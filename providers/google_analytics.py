@@ -9,7 +9,7 @@ class GoogleAnalyticsProvider(BaseProvider):
             client_id=os.getenv("GOOGLE_ANALYTICS_CLIENT_ID", ""),
             client_secret=os.getenv("GOOGLE_ANALYTICS_CLIENT_SECRET", ""),
             redirect_uri=os.getenv("GOOGLE_ANALYTICS_REDIRECT_URI", "http://localhost:8501"),
-            scope="https://www.googleapis.com/auth/analytics.readonly"
+            scope="https://www.googleapis.com/auth/analytics.readonly openid email profile"
         )
     
     def get_auth_url(self) -> str:

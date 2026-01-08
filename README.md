@@ -25,6 +25,10 @@ Create a `.env` file in the root directory with your Google Analytics OAuth2 cre
 GOOGLE_ANALYTICS_CLIENT_ID=your_google_analytics_client_id
 GOOGLE_ANALYTICS_CLIENT_SECRET=your_google_analytics_client_secret
 GOOGLE_ANALYTICS_REDIRECT_URI=http://localhost:8501
+
+# BigQuery Configuration (optional)
+BIGQUERY_ACCOUNT=local-test/bigquery_cred.json
+BIGQUERY_TABLE=your-project.your-dataset.your-table
 ```
 
 ### 3. Get Google Analytics OAuth2 Credentials
@@ -35,6 +39,15 @@ GOOGLE_ANALYTICS_REDIRECT_URI=http://localhost:8501
 4. Go to "Credentials" → "Create Credentials" → "OAuth 2.0 Client ID"
 5. Set the authorized redirect URI to `http://localhost:8501`
 6. Copy the Client ID and Client Secret to your `.env` file
+
+### 4. Setup BigQuery (Optional)
+
+1. Create a BigQuery dataset in your Google Cloud project
+2. Create a service account with BigQuery Data Editor role
+3. Download the service account JSON key and save it as a file (e.g., `local-test/bigquery_cred.json`)
+4. Set `BIGQUERY_ACCOUNT` in `.env` to the path of the JSON file
+5. Set `BIGQUERY_TABLE` to your full table path: `project_id.dataset.table`
+6. The table will be created automatically with the correct schema if it doesn't exist
 
 ## Usage
 
@@ -59,6 +72,26 @@ The app will open in your browser at `http://localhost:8501`
 - Refresh Token (if available)
 - Token expiration details
 - Token type and scope
+
+## BigQuery Integration
+
+After retrieving tokens, you can save them to BigQuery. Configure the following in your `.env` file:
+
+1. **BIGQUERY_ACCOUNT**: Path to the service account JSON file (e.g., `local-test/bigquery_cred.json`)
+2. **BIGQUERY_TABLE**: Full BigQuery table path in format `project_id.dataset.table`
+
+The table should have the following schema:
+- `email` (STRING)
+- `name` (STRING)
+- `unique_id` (STRING)
+- `platform` (STRING) - e.g., "googleanalytics"
+- `access_token` (STRING)
+- `refresh_token` (STRING)
+- `expires_in` (INTEGER)
+- `scope` (STRING)
+- `token_type` (STRING)
+- `refresh_token_expires_in` (INTEGER)
+- `created_at` (TIMESTAMP)
 
 ## Important Notes
 

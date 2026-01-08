@@ -1,5 +1,7 @@
 import streamlit as st
 import os
+import json
+from datetime import datetime
 from dotenv import load_dotenv
 import requests
 from urllib.parse import urlencode, parse_qs, urlparse
@@ -7,13 +9,20 @@ from providers import PROVIDERS
 
 load_dotenv()
 
+try:
+    from google.cloud import bigquery
+    from google.oauth2 import service_account
+    from google.cloud.exceptions import NotFound
+    BIGQUERY_AVAILABLE = True
+except ImportError:
+    BIGQUERY_AVAILABLE = False
+
 st.set_page_config(
     page_title="OAuth2 Playground",
     layout="wide"
 )
 
 st.title("OAuth2 Authentication Playground")
-st.markdown("Test OAuth2 authentication and view credentials (not saved)")
 
 if 'auth_code' not in st.session_state:
     st.session_state.auth_code = None
@@ -25,6 +34,8 @@ if 'provider_instance' not in st.session_state:
     st.session_state.provider_instance = None
 if 'code_just_extracted' not in st.session_state:
     st.session_state.code_just_extracted = False
+if 'saved_to_bigquery' not in st.session_state:
+    st.session_state.saved_to_bigquery = False
 
 code_extracted_this_run = False
 try:
@@ -77,14 +88,12 @@ with st.sidebar:
         client_id = st.text_input(
             f"{selected_provider_name} Client ID",
             value=provider_instance.client_id,
-            type="default",
-            help=f"Set {provider_instance.get_env_vars()['client_id']} in .env file to auto-populate"
+            type="default"
         )
         client_secret = st.text_input(
             f"{selected_provider_name} Client Secret",
             value=provider_instance.client_secret,
-            type="password",
-            help=f"Set {provider_instance.get_env_vars()['client_secret']} in .env file to auto-populate"
+            type="password"
         )
         redirect_uri = st.text_input(
             "Redirect URI",
@@ -112,14 +121,12 @@ with st.sidebar:
         client_id = st.text_input(
             "Client ID",
             value=os.getenv("APP_CLIENT_ID", ""),
-            type="default",
-            help="Set APP_CLIENT_ID in .env file to auto-populate"
+            type="default"
         )
         client_secret = st.text_input(
             "Client Secret",
             value=os.getenv("APP_CLIENT_SECRET", ""),
-            type="password",
-            help="Set APP_CLIENT_SECRET in .env file to auto-populate"
+            type="password"
         )
         redirect_uri = st.text_input(
             "Redirect URI",
@@ -153,7 +160,7 @@ with col1:
     st.header("Authentication")
     
     if not client_id or not client_secret:
-        st.warning("Please configure Client ID and Client Secret in the sidebar or .env file")
+        st.warning("Configure Client ID and Client Secret")
     else:
         if st.session_state.provider_instance:
             params = st.session_state.provider_instance.get_auth_params()
@@ -168,20 +175,13 @@ with col1:
         auth_url_full = f"{auth_url}?{urlencode(params)}"
         
         st.markdown("### Step 1: Authorize")
-        st.markdown(f"Click the button below to start the OAuth2 flow (opens in new tab):")
-        st.markdown(f"**Authorization URL:**")
         st.code(auth_url_full, language=None)
-        
-        redirect_uri_used = params.get('redirect_uri', redirect_uri)
-        st.caption(f"Redirect URI used in authorization: `{redirect_uri_used}`")
-        
         st.link_button("Start OAuth2 Flow", auth_url_full, type="primary")
-        st.info("After authorization, you'll be redirected back to this app (may open in a new tab). The authorization code will be automatically extracted from the URL - just switch back to this tab if needed.")
         
         st.markdown("### Step 2: Enter Authorization Code")
         
         if st.session_state.code_just_extracted and st.session_state.auth_code:
-            st.success("Authorization code automatically extracted from URL!")
+            st.success("Code extracted from URL")
             st.session_state.code_just_extracted = False
         
         try:
@@ -192,21 +192,16 @@ with col1:
                     if isinstance(url_code, list):
                         url_code = url_code[0] if url_code else None
                     if url_code and str(url_code).strip() and url_code != st.session_state.auth_code:
-                        st.warning("Code detected in URL but not automatically extracted. Click the button below to extract it manually.")
                         if st.button("Extract Code from URL", type="secondary", key="extract_code_btn"):
                             st.session_state.auth_code = str(url_code).strip()
                             st.rerun()
-            else:
-                if not st.session_state.auth_code:
-                    st.info("Tip: If you see a 'code' parameter in your browser's URL, copy it and paste it in the field above.")
         except:
             pass
         
         auth_code = st.text_input(
-            "Authorization Code (from redirect URL)",
+            "Authorization Code",
             value=st.session_state.auth_code or "",
-            type="default",
-            help="The code will be automatically extracted from the URL when you're redirected back, or you can paste it manually"
+            type="default"
         )
         
         if auth_code:
@@ -214,9 +209,9 @@ with col1:
             
             if st.button("Exchange Code for Tokens", type="primary"):
                 if not client_secret or not client_secret.strip():
-                    st.error("Client Secret is required! Please enter it in the sidebar.")
+                    st.error("Client Secret required")
                 elif not client_id or not client_id.strip():
-                    st.error("Client ID is required! Please enter it in the sidebar.")
+                    st.error("Client ID required")
                 else:
                     with st.spinner("Exchanging authorization code for tokens..."):
                         try:
@@ -231,46 +226,39 @@ with col1:
                                     "grant_type": "authorization_code"
                                 }
                             
-                            with st.expander("Debug - Token Exchange Details", expanded=False):
-                                st.write("**Values being sent to token endpoint:**")
-                                st.write(f"- Client ID: `{token_data.get('client_id', 'N/A')[:30]}...`")
-                                client_secret_value = token_data.get('client_secret', '')
-                                if client_secret_value:
-                                    st.write(f"- Client Secret: `{'*' * min(len(client_secret_value), 20)}...` (length: {len(client_secret_value)})")
-                                else:
-                                    st.error("Client Secret is MISSING or EMPTY!")
-                                st.write(f"- Redirect URI: `{token_data.get('redirect_uri', 'N/A')}`")
-                                st.write(f"- Code length: {len(token_data.get('code', ''))} characters")
-                                st.write(f"- Token URL: `{token_url}`")
-                                st.write(f"- Grant type: `{token_data.get('grant_type', 'N/A')}`")
-                            
                             response = requests.post(token_url, data=token_data)
                             response.raise_for_status()
                             tokens = response.json()
                             st.session_state.tokens = tokens
                             
-                            if userinfo_url and "access_token" in tokens:
+                            if "access_token" in tokens:
                                 access_token = tokens["access_token"]
                                 
-                                if st.session_state.provider_instance:
-                                    if hasattr(st.session_state.provider_instance, 'get_userinfo_headers'):
-                                        headers = st.session_state.provider_instance.get_userinfo_headers(access_token)
+                                if userinfo_url:
+                                    if st.session_state.provider_instance:
+                                        if hasattr(st.session_state.provider_instance, 'get_userinfo_headers'):
+                                            headers = st.session_state.provider_instance.get_userinfo_headers(access_token)
+                                        else:
+                                            headers = {"Authorization": f"Bearer {access_token}"}
+                                        
+                                        if hasattr(st.session_state.provider_instance, 'get_userinfo_params'):
+                                            params = st.session_state.provider_instance.get_userinfo_params(access_token)
+                                            user_response = requests.get(userinfo_url, headers=headers, params=params)
+                                        else:
+                                            user_response = requests.get(userinfo_url, headers=headers)
                                     else:
                                         headers = {"Authorization": f"Bearer {access_token}"}
-                                    
-                                    if hasattr(st.session_state.provider_instance, 'get_userinfo_params'):
-                                        params = st.session_state.provider_instance.get_userinfo_params(access_token)
-                                        user_response = requests.get(userinfo_url, headers=headers, params=params)
-                                    else:
                                         user_response = requests.get(userinfo_url, headers=headers)
-                                else:
+                                    
+                                    if user_response.status_code == 200:
+                                        st.session_state.user_info = user_response.json()
+                                elif st.session_state.provider_instance and st.session_state.provider_instance.name in ["Google", "Google Analytics"]:
                                     headers = {"Authorization": f"Bearer {access_token}"}
-                                    user_response = requests.get(userinfo_url, headers=headers)
-                                
-                                if user_response.status_code == 200:
-                                    st.session_state.user_info = user_response.json()
+                                    user_response = requests.get("https://www.googleapis.com/oauth2/v3/userinfo", headers=headers)
+                                    if user_response.status_code == 200:
+                                        st.session_state.user_info = user_response.json()
                             
-                            st.success("Tokens retrieved successfully!")
+                            st.success("Tokens retrieved")
                             st.rerun()
                             
                         except requests.exceptions.RequestException as e:
@@ -287,69 +275,179 @@ with col2:
     if st.session_state.tokens:
         st.success("Authentication successful!")
         
-        st.markdown("### Tokens")
-        with st.expander("View Tokens", expanded=True):
-            tokens_display = st.session_state.tokens.copy()
-            if "access_token" in tokens_display:
-                tokens_display["access_token"] = tokens_display["access_token"][:50] + "..."
-            st.json(tokens_display)
+        tab1, tab2 = st.tabs(["Tokens", "User Info"])
         
-        if "access_token" in st.session_state.tokens:
-            st.markdown("**Access Token (full):**")
-            st.code(st.session_state.tokens["access_token"], language=None)
+        with tab1:
+            st.markdown("### Tokens")
+            with st.expander("View Tokens", expanded=True):
+                tokens_display = st.session_state.tokens.copy()
+                if "access_token" in tokens_display:
+                    tokens_display["access_token"] = tokens_display["access_token"][:50] + "..."
+                st.json(tokens_display)
+            
+            if "access_token" in st.session_state.tokens:
+                st.markdown("**Access Token (full):**")
+                st.code(st.session_state.tokens["access_token"], language=None)
+            
+            if "refresh_token" in st.session_state.tokens:
+                st.markdown("**Refresh Token:**")
+                st.code(st.session_state.tokens["refresh_token"], language=None)
+            
+            st.markdown("### Token Details")
+            token_details = {}
+            if "expires_in" in st.session_state.tokens:
+                token_details["Expires In (seconds)"] = st.session_state.tokens["expires_in"]
+            if "token_type" in st.session_state.tokens:
+                token_details["Token Type"] = st.session_state.tokens["token_type"]
+            if "scope" in st.session_state.tokens:
+                token_details["Scope"] = st.session_state.tokens["scope"]
+            
+            if token_details:
+                st.json(token_details)
         
-        if "refresh_token" in st.session_state.tokens:
-            st.markdown("**Refresh Token:**")
-            st.code(st.session_state.tokens["refresh_token"], language=None)
-        
-        st.markdown("### Token Details")
-        token_details = {}
-        if "expires_in" in st.session_state.tokens:
-            token_details["Expires In (seconds)"] = st.session_state.tokens["expires_in"]
-        if "token_type" in st.session_state.tokens:
-            token_details["Token Type"] = st.session_state.tokens["token_type"]
-        if "scope" in st.session_state.tokens:
-            token_details["Scope"] = st.session_state.tokens["scope"]
-        
-        if token_details:
-            st.json(token_details)
-        
-        if st.session_state.user_info:
+        with tab2:
             st.markdown("### User Information")
-            with st.expander("View User Info", expanded=True):
-                st.json(st.session_state.user_info)
-                
-                if "name" in st.session_state.user_info:
-                    st.markdown(f"**Name:** {st.session_state.user_info['name']}")
-                elif "data" in st.session_state.user_info and "display_name" in st.session_state.user_info["data"]:
-                    st.markdown(f"**Display Name:** {st.session_state.user_info['data']['display_name']}")
-                
-                if "email" in st.session_state.user_info:
-                    st.markdown(f"**Email:** {st.session_state.user_info['email']}")
-                
-                if "picture" in st.session_state.user_info:
-                    if isinstance(st.session_state.user_info["picture"], dict):
-                        picture_url = st.session_state.user_info["picture"].get("data", {}).get("url", 
-                                    st.session_state.user_info["picture"].get("url", ""))
-                    else:
-                        picture_url = st.session_state.user_info["picture"]
-                    if picture_url:
-                        st.image(picture_url, width=100)
+            if st.session_state.user_info:
+                with st.expander("View User Info", expanded=True):
+                    st.json(st.session_state.user_info)
+                    
+                    if "name" in st.session_state.user_info:
+                        st.markdown(f"**Name:** {st.session_state.user_info['name']}")
+                    elif "data" in st.session_state.user_info and "display_name" in st.session_state.user_info["data"]:
+                        st.markdown(f"**Display Name:** {st.session_state.user_info['data']['display_name']}")
+                    
+                    if "email" in st.session_state.user_info:
+                        st.markdown(f"**Email:** {st.session_state.user_info['email']}")
+                    
+                    if "id" in st.session_state.user_info or "sub" in st.session_state.user_info:
+                        unique_id = st.session_state.user_info.get('id') or st.session_state.user_info.get('sub')
+                        st.markdown(f"**Unique ID:** {unique_id}")
+                    
+                    if "picture" in st.session_state.user_info:
+                        if isinstance(st.session_state.user_info["picture"], dict):
+                            picture_url = st.session_state.user_info["picture"].get("data", {}).get("url", 
+                                        st.session_state.user_info["picture"].get("url", ""))
+                        else:
+                            picture_url = st.session_state.user_info["picture"]
+                        if picture_url:
+                            st.image(picture_url, width=100)
+            else:
+                st.info("User information not available")
 
+        st.markdown("---")
+        
+        if BIGQUERY_AVAILABLE:
+            bigquery_cred_path = os.getenv("BIGQUERY_ACCOUNT", "")
+            bigquery_table_path = os.getenv("BIGQUERY_TABLE", "")
+            
+            if bigquery_cred_path and bigquery_table_path:
+                if st.button("Save to BigQuery", type="primary"):
+                    with st.spinner("Saving tokens to BigQuery..."):
+                        try:
+                            cred_path = bigquery_cred_path.strip().strip('"').strip("'")
+                            
+                            if not os.path.exists(cred_path):
+                                st.error(f"Credentials file not found: {cred_path}")
+                                raise FileNotFoundError(f"Credentials file not found: {cred_path}")
+                            
+                            with open(cred_path, 'r') as f:
+                                service_account_info = json.load(f)
+                            
+                            if 'project_id' not in service_account_info:
+                                st.error("Missing 'project_id' in service account JSON file")
+                                raise ValueError("Missing project_id")
+                            
+                            credentials = service_account.Credentials.from_service_account_info(service_account_info)
+                            
+                            table_id = bigquery_table_path
+                            table_parts = table_id.split('.')
+                            if len(table_parts) == 3:
+                                table_project = table_parts[0]
+                                client = bigquery.Client(credentials=credentials, project=table_project)
+                            else:
+                                client = bigquery.Client(credentials=credentials, project=service_account_info['project_id'])
+                            
+                            tokens = st.session_state.tokens
+                            user_info = st.session_state.user_info or {}
+                            
+                            email = ''
+                            name = ''
+                            unique_id = ''
+                            
+                            if user_info:
+                                email = user_info.get('email') or user_info.get('mail') or ''
+                                name = user_info.get('name') or user_info.get('display_name') or user_info.get('full_name') or ''
+                                if not name and (user_info.get('given_name') or user_info.get('family_name')):
+                                    name = f"{user_info.get('given_name', '')} {user_info.get('family_name', '')}".strip()
+                                unique_id = user_info.get('id') or user_info.get('sub') or user_info.get('user_id') or user_info.get('account_id') or ''
+                            
+                            if not email:
+                                st.error("Email not found in user info")
+                                raise ValueError("Missing email in user info")
+                            
+                            if not unique_id:
+                                unique_id = email
+                            
+                            if not name:
+                                name = email.split('@')[0]
+                            
+                            try:
+                                client.get_table(table_id)
+                            except NotFound:
+                                if len(table_parts) == 3:
+                                    schema = [
+                                        bigquery.SchemaField("email", "STRING"),
+                                        bigquery.SchemaField("name", "STRING"),
+                                        bigquery.SchemaField("unique_id", "STRING"),
+                                        bigquery.SchemaField("platform", "STRING"),
+                                        bigquery.SchemaField("access_token", "STRING"),
+                                        bigquery.SchemaField("refresh_token", "STRING"),
+                                        bigquery.SchemaField("expires_in", "INTEGER"),
+                                        bigquery.SchemaField("scope", "STRING"),
+                                        bigquery.SchemaField("token_type", "STRING"),
+                                        bigquery.SchemaField("refresh_token_expires_in", "INTEGER"),
+                                        bigquery.SchemaField("created_at", "TIMESTAMP")
+                                    ]
+                                    
+                                    table = bigquery.Table(table_id, schema=schema)
+                                    table = client.create_table(table)
+                                    st.info(f"Created table {table_id} with schema")
+                                    
+                                    import time
+                                    time.sleep(1)
+                            
+                            row = {
+                                "email": email,
+                                "name": name,
+                                "unique_id": str(unique_id),
+                                "platform": "googleanalytics",
+                                "access_token": tokens.get("access_token", ""),
+                                "refresh_token": tokens.get("refresh_token", ""),
+                                "expires_in": tokens.get("expires_in"),
+                                "scope": tokens.get("scope", ""),
+                                "token_type": tokens.get("token_type", ""),
+                                "refresh_token_expires_in": tokens.get("refresh_token_expires_in"),
+                                "created_at": datetime.utcnow().isoformat()
+                            }
+                            
+                            errors = client.insert_rows_json(table_id, [row])
+                            if errors:
+                                st.error(f"Error saving to BigQuery: {errors}")
+                            else:
+                                st.success("Saved to BigQuery")
+                                st.session_state.saved_to_bigquery = True
+                        except Exception as e:
+                            st.error(f"Error saving to BigQuery: {str(e)}")
+            else:
+                st.info("Set BIGQUERY_ACCOUNT and BIGQUERY_TABLE in .env to enable BigQuery saving")
+        else:
+            st.info("Install google-cloud-bigquery to enable BigQuery saving")
+        
         if st.button("Clear Credentials", type="secondary"):
             st.session_state.auth_code = None
             st.session_state.tokens = None
             st.session_state.user_info = None
+            st.session_state.saved_to_bigquery = False
             st.rerun()
     else:
         st.info("Complete the authentication flow to see credentials here")
-        st.markdown("""
-        **What will be displayed:**
-        - Access Token
-        - Refresh Token (if available)
-        - Token expiration details
-        - User information (name, email, etc.)
-        """)
-
-st.markdown("---")
-st.markdown("**Note:** This is a playground for testing OAuth2. Credentials are NOT saved and are only displayed for verification purposes.")
