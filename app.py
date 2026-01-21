@@ -36,6 +36,8 @@ if 'code_just_extracted' not in st.session_state:
     st.session_state.code_just_extracted = False
 if 'saved_to_bigquery' not in st.session_state:
     st.session_state.saved_to_bigquery = False
+if 'last_selected_provider' not in st.session_state:
+    st.session_state.last_selected_provider = None
 
 code_extracted_this_run = False
 try:
@@ -78,32 +80,45 @@ with st.sidebar:
     provider_names = list(PROVIDERS.keys()) + ["Custom"]
     selected_provider_name = st.selectbox(
         "Select OAuth2 Provider",
-        provider_names
+        provider_names,
+        key="provider_selectbox"
     )
+    
+    # Check if provider changed and force rerun to refresh values from .env
+    if st.session_state.last_selected_provider is not None and st.session_state.last_selected_provider != selected_provider_name:
+        st.session_state.last_selected_provider = selected_provider_name
+        st.rerun()
+    else:
+        st.session_state.last_selected_provider = selected_provider_name
     
     if selected_provider_name in PROVIDERS:
         provider_instance = PROVIDERS[selected_provider_name]()
         st.session_state.provider_instance = provider_instance
         
+        # Always use fresh env values when provider instance is created
         client_id = st.text_input(
             f"{selected_provider_name} Client ID",
             value=provider_instance.client_id,
-            type="default"
+            type="default",
+            key=f"{selected_provider_name}_client_id"
         )
         client_secret = st.text_input(
             f"{selected_provider_name} Client Secret",
             value=provider_instance.client_secret,
-            type="password"
+            type="password",
+            key=f"{selected_provider_name}_client_secret"
         )
         redirect_uri = st.text_input(
             "Redirect URI",
             value=provider_instance.redirect_uri,
-            type="default"
+            type="default",
+            key=f"{selected_provider_name}_redirect_uri"
         )
         scope = st.text_input(
             "Scopes (comma-separated)",
             value=provider_instance.scope,
-            type="default"
+            type="default",
+            key=f"{selected_provider_name}_scope"
         )
         
         provider_instance.client_id = client_id
@@ -229,6 +244,19 @@ with col1:
                             response = requests.post(token_url, data=token_data)
                             response.raise_for_status()
                             tokens = response.json()
+                            
+                            # For Facebook, exchange short-lived token for long-lived token
+                            if st.session_state.provider_instance and st.session_state.provider_instance.name == "Facebook":
+                                if "access_token" in tokens:
+                                    short_lived_token = tokens["access_token"]
+                                    try:
+                                        long_lived_response = st.session_state.provider_instance.exchange_for_long_lived_token(short_lived_token)
+                                        # Update tokens with long-lived token data
+                                        tokens.update(long_lived_response)
+                                        st.info("✅ Exchanged for long-lived token (60 days)")
+                                    except Exception as e:
+                                        st.warning(f"Could not exchange for long-lived token: {str(e)}. Using short-lived token.")
+                            
                             st.session_state.tokens = tokens
                             
                             if "access_token" in tokens:
@@ -255,6 +283,14 @@ with col1:
                                 elif st.session_state.provider_instance and st.session_state.provider_instance.name in ["Google", "Google Analytics"]:
                                     headers = {"Authorization": f"Bearer {access_token}"}
                                     user_response = requests.get("https://www.googleapis.com/oauth2/v3/userinfo", headers=headers)
+                                    if user_response.status_code == 200:
+                                        st.session_state.user_info = user_response.json()
+                                elif st.session_state.provider_instance and st.session_state.provider_instance.name == "Facebook":
+                                    # Facebook Graph API uses access_token as query parameter
+                                    user_response = requests.get(
+                                        "https://graph.facebook.com/v24.0/me",
+                                        params={"access_token": access_token, "fields": "id,name,email,picture"}
+                                    )
                                     if user_response.status_code == 200:
                                         st.session_state.user_info = user_response.json()
                             
@@ -396,17 +432,17 @@ with col2:
                             except NotFound:
                                 if len(table_parts) == 3:
                                     schema = [
-                                        bigquery.SchemaField("email", "STRING"),
-                                        bigquery.SchemaField("name", "STRING"),
-                                        bigquery.SchemaField("unique_id", "STRING"),
-                                        bigquery.SchemaField("platform", "STRING"),
-                                        bigquery.SchemaField("access_token", "STRING"),
-                                        bigquery.SchemaField("refresh_token", "STRING"),
-                                        bigquery.SchemaField("expires_in", "INTEGER"),
-                                        bigquery.SchemaField("scope", "STRING"),
-                                        bigquery.SchemaField("token_type", "STRING"),
-                                        bigquery.SchemaField("refresh_token_expires_in", "INTEGER"),
-                                        bigquery.SchemaField("created_at", "TIMESTAMP")
+                                        bigquery.SchemaField("email", "STRING", mode="REQUIRED"),
+                                        bigquery.SchemaField("name", "STRING", mode="REQUIRED"),
+                                        bigquery.SchemaField("unique_id", "STRING", mode="REQUIRED"),
+                                        bigquery.SchemaField("platform", "STRING", mode="REQUIRED"),
+                                        bigquery.SchemaField("access_token", "STRING", mode="REQUIRED"),
+                                        bigquery.SchemaField("refresh_token", "STRING", mode="NULLABLE"),
+                                        bigquery.SchemaField("expires_in", "INTEGER", mode="NULLABLE"),
+                                        bigquery.SchemaField("scope", "STRING", mode="NULLABLE"),
+                                        bigquery.SchemaField("token_type", "STRING", mode="NULLABLE"),
+                                        bigquery.SchemaField("refresh_token_expires_in", "INTEGER", mode="NULLABLE"),
+                                        bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED")
                                     ]
                                     
                                     table = bigquery.Table(table_id, schema=schema)
@@ -416,16 +452,22 @@ with col2:
                                     import time
                                     time.sleep(1)
                             
+                            # Determine platform name
+                            platform_name = "custom"
+                            if st.session_state.provider_instance:
+                                provider_name = st.session_state.provider_instance.name.lower().replace(" ", "")
+                                platform_name = provider_name
+                            
                             row = {
                                 "email": email,
                                 "name": name,
                                 "unique_id": str(unique_id),
-                                "platform": "googleanalytics",
-                                "access_token": tokens.get("access_token", ""),
-                                "refresh_token": tokens.get("refresh_token", ""),
+                                "platform": platform_name,
+                                "access_token": tokens.get("access_token") or "",
+                                "refresh_token": tokens.get("refresh_token") or None,
                                 "expires_in": tokens.get("expires_in"),
-                                "scope": tokens.get("scope", ""),
-                                "token_type": tokens.get("token_type", ""),
+                                "scope": tokens.get("scope") or None,
+                                "token_type": tokens.get("token_type") or None,
                                 "refresh_token_expires_in": tokens.get("refresh_token_expires_in"),
                                 "created_at": datetime.utcnow().isoformat()
                             }
